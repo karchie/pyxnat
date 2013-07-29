@@ -10,6 +10,7 @@ import zipfile
 import time
 import urllib
 import codecs
+import logging
 from fnmatch import fnmatch
 from itertools import islice
 
@@ -38,12 +39,16 @@ from . import downloadutils
 
 DEBUG = False
 
+logger = logging.getLogger('pyxnat.resources')
+
 # metaclasses
 
 def get_element_from_element(rsc_name):
 
     def getter(self, ID):
         Element = globals()[rsc_name.title()]
+
+        logger.debug('new %s element from element %s', rsc_name, self._uri)
 
         return Element(join_uri(self._uri, rsc_name + 's', ID), self._intf)
 
@@ -54,6 +59,9 @@ def get_element_from_collection(rsc_name):
     def getter(self, ID):
         Element = globals()[rsc_name.title()]
         Collection = globals()[rsc_name.title() + 's']
+
+        logger.debug('new %s element from collection %s %s', rsc_name, self,
+                     [e._uri for e in self])
 
         return Collection([Element(join_uri(eobj._uri, rsc_name + 's', ID),
                                    self._intf
@@ -69,6 +77,9 @@ def get_collection_from_element(rsc_name):
     def getter(self, id_filter='*'):
 
         Collection = globals()[rsc_name.title()]
+
+        logger.debug('new %s collection from element %s', rsc_name, self._uri)
+
         return Collection(join_uri(self._uri, rsc_name),
                           self._intf, id_filter
                           )
@@ -80,6 +91,8 @@ def get_collection_from_collection(rsc_name):
     def getter(self, id_filter='*'):
         Collection = globals()[rsc_name.title()]
 
+        logger.debug('new %s collection from collection %s %s',
+                     rsc_name, self, [e for e in self])
         return Collection(self, self._intf, id_filter,
                           rsc_name, self._id_header, self._columns)
 
@@ -471,6 +484,159 @@ class EObject(object):
             tag.delete()
 
 
+def _iter_cobjectcuri(self):
+    if self._id_header == 'ID':
+        id_header = schema.json[uri_last(self._cbase)][0]
+    elif self._id_header == 'label':
+        id_header = schema.json[uri_last(self._cbase)][1]
+    else:
+        id_header = self._id_header
+
+    for res in self._call([id_header] + self._columns):
+        try:
+            eid = urllib.unquote(res[id_header])
+            if fnmatch(eid, self._pattern):
+                klass_name = uri_last(self._cbase).rstrip('s').title()
+                Klass = globals().get(klass_name, self._intf.__class__)
+                eobj = Klass(join_uri(self._cbase, eid), self._intf)
+                if self._nested is None:
+                    self._run_callback(self, eobj)
+                    yield eobj
+                else:
+                    Klass = globals().get(self._nested.title(),
+                                          self._intf.__class__)
+                    for subeobj in Klass(
+                            cbase=join_uri(eobj._uri, self._nested),
+                            interface=self._intf,
+                            pattern=self._pattern,
+                            id_header=self._id_header,
+                            columns=self._columns):
+                        
+                        try:
+                            self._run_callback(self, subeobj)
+                            yield subeobj
+                        except RuntimeError:
+                            pass
+
+        except KeyboardInterrupt:
+            self._intf._connect()
+            raise StopIteration
+
+def _iter_cobjecteuris(self):
+    for uri in self._cbase:
+        try:
+            Klass = globals().get(uri_nextlast(uri).rstrip('s').title(),
+                                  self._intf.__class__)
+            eobj = Klass(uri, self._intf)
+            if self._nested is None:
+                self._run_callback(self, eobj)
+                yield eobj
+            else:
+                Klass = globals().get(self._nested.title(),
+                                      self._intf.__class__)
+                for subeobj in Klass(
+                        cbase=join_uri(eobj._uri, self._nested),
+                        interface=self._intf,
+                        pattern=self._pattern,
+                        id_header=self._id_header,
+                        columns=self._columns):
+                    
+                    try:
+                        self._run_callback(self, subeobj)
+                        yield subeobj
+                    except RuntimeError:
+                        pass
+
+        except KeyboardInterrupt:
+            self._intf._connect()
+            raise StopIteration
+
+def _iter_cobjecteobjects(self):
+    for eobj in self._cbase:
+        try:
+            if self._nested is None:
+                self._run_callback(self, eobj)
+                yield eobj
+            else:
+                Klass = globals().get(self._nested.rstrip('s').title(),
+                                      self._intf.__class__)
+                logger.debug('nested class %s', Klass)
+                for subeobj in Klass(
+                        cbase=join_uri(eobj._uri, self._nested),
+                        interface=self._intf,
+                        pattern=self._pattern,
+                        id_header=self._id_header,
+                        columns=self._columns):
+                    
+                    try:
+                        self._run_callback(self, subeobj)
+                        yield subeobj
+                    except RuntimeError:
+                        pass
+
+        except KeyboardInterrupt:
+            self._intf._connect()
+            raise StopIteration
+
+def _iter_cobjectcobject(self):
+    for eobj in self._cbase:
+        try:
+            if self._nested is None:
+                self._run_callback(self, eobj)
+                yield eobj
+            else:
+                Klass = globals().get(self._nested.title(),
+                                      self._intf.__class__)
+                logger.debug('nested class %s', Klass)
+                for subeobj in Klass(
+                        cbase=join_uri(eobj._uri, self._nested),
+                        interface=self._intf,
+                        pattern=self._pattern,
+                        id_header=self._id_header,
+                        columns=self._columns):
+                    
+                    try:
+                        self._run_callback(self, eobj)
+                        yield subeobj
+                    except RuntimeError:
+                        pass
+
+        except KeyboardInterrupt:
+            self._intf._connect()
+            raise StopIteration
+
+def _iter_cobjectcobjects(self):
+    for cobj in self._cbase:
+        try:
+            for eobj in cobj:
+                if self._nested is None:
+                    self._run_callback(self, eobj)
+                    yield eobj
+                else:
+                    Klass = globals().get(cobj._nested.title(),
+                                          self._intf.__class__)
+                    
+                    for subeobj in Klass(
+                            cbase=join_uri(eobj._uri, cobj._nested),
+                            interface=cobj._intf,
+                            pattern=cobj._pattern,
+                            id_header=cobj._id_header,
+                            columns=cobj._columns):
+                        
+                        try:
+                            self._run_callback(self, eobj)
+                            yield subeobj
+                        except RuntimeError:
+                            pass
+                            
+        except KeyboardInterrupt:
+            self._intf._connect()
+            raise StopIteration
+
+def _iter_empty(self):
+    return                  # for empty in []: yield empty
+    yield
+
 class CObject(object):
     """ Generic Object for a collection resource.
 
@@ -538,23 +704,27 @@ class CObject(object):
         self._nested = nested
 
         if isinstance(cbase, basestring):
-            self._ctype = 'cobjectcuri'
+            self._iterfn = _iter_cobjectcuri
         elif isinstance(cbase, CObject):
-            self._ctype = 'cobjectcobject'
+            self._iterfn = _iter_cobjectcobject
         elif isinstance(cbase, list) and cbase:
             if isinstance(cbase[0], basestring):
-                self._ctype = 'cobjecteuris'
+                self._iterfn = _iter_cobjecteuris
             if isinstance(cbase[0], EObject):
-                self._ctype = 'cobjecteobjects'
+                self._iterfn = _iter_cobjecteobjects
             if isinstance(cbase[0], CObject):
-                self._ctype = 'cobjectcobjects'
+                self._iterfn = _iter_cobjectcobjects
         elif isinstance(cbase, list) and not cbase:
-            self._ctype = 'cobjectempty'
+            self._iterfn = _iter_empty
         else:
             raise Exception('Invalid collection accessor type: %s' % cbase)
 
+    def __iter__(self):
+        logger.debug('__iter__ calling %s on %s', self._iterfn, self)
+        return self._iterfn(self)
+
     def __repr__(self):
-        return '<Collection Object> %s' % id(self)
+        return '<%s Collection> %s' % (self.__class__.__name__, id(self))
 
     def _call(self, columns):
         try:
@@ -645,159 +815,6 @@ class CObject(object):
         self._intf._struct.update(request_knowledge)
 
         json.dump(request_knowledge, open(reqcache, 'w'))
-
-    def __iter__(self):
-        if self._ctype == 'cobjectcuri':
-            if self._id_header == 'ID':
-                id_header = schema.json[uri_last(self._cbase)][0]
-            elif self._id_header == 'label':
-                id_header = schema.json[uri_last(self._cbase)][1]
-            else:
-                id_header = self._id_header
-
-            for res in self._call([id_header] + self._columns):
-                try:
-                    eid = urllib.unquote(res[id_header])
-                    if fnmatch(eid, self._pattern):
-                        klass_name = uri_last(self._cbase
-                                              ).rstrip('s').title()
-                        Klass = globals().get(klass_name, self._intf.__class__)
-                        eobj = Klass(join_uri(self._cbase, eid), self._intf)
-                        if self._nested is None:
-                            self._run_callback(self, eobj)
-                            yield eobj
-                        else:
-                            Klass = globals().get(self._nested.title(),
-                                                  self._intf.__class__)
-                            for subeobj in Klass(
-                                cbase=join_uri(eobj._uri, self._nested),
-                                interface=self._intf,
-                                pattern=self._pattern,
-                                id_header=self._id_header,
-                                columns=self._columns):
-
-                                try:
-                                    self._run_callback(self, subeobj)
-                                    yield subeobj
-                                except RuntimeError:
-                                    pass
-
-                except KeyboardInterrupt:
-                    self._intf._connect()
-                    raise StopIteration
-
-        elif self._ctype == 'cobjecteuris':
-            for uri in self._cbase:
-                try:
-                    Klass = globals().get(uri_nextlast(uri).rstrip('s').title(),
-                                          self._intf.__class__)
-                    eobj = Klass(uri, self._intf)
-                    if self._nested is None:
-                        self._run_callback(self, eobj)
-                        yield eobj
-                    else:
-                        Klass = globals().get(self._nested.title(),
-                                              self._intf.__class__)
-                        for subeobj in Klass(
-                            cbase=join_uri(eobj._uri, self._nested),
-                            interface=self._intf,
-                            pattern=self._pattern,
-                            id_header=self._id_header,
-                            columns=self._columns):
-
-                            try:
-                                self._run_callback(self, subeobj)
-                                yield subeobj
-                            except RuntimeError:
-                                pass
-
-                except KeyboardInterrupt:
-                    self._intf._connect()
-                    raise StopIteration
-
-        elif self._ctype == 'cobjecteobjects':
-            for eobj in self._cbase:
-                try:
-                    if self._nested is None:
-                        self._run_callback(self, eobj)
-                        yield eobj
-                    else:
-                        Klass = globals().get(self._nested.rstrip('s').title(),
-                                              self._intf.__class__)
-                        for subeobj in Klass(
-                            cbase=join_uri(eobj._uri, self._nested),
-                            interface=self._intf,
-                            pattern=self._pattern,
-                            id_header=self._id_header,
-                            columns=self._columns):
-
-                            try:
-                                self._run_callback(self, subeobj)
-                                yield subeobj
-                            except RuntimeError:
-                                pass
-
-                except KeyboardInterrupt:
-                    self._intf._connect()
-                    raise StopIteration
-
-        elif self._ctype == 'cobjectcobject':
-            for eobj in self._cbase:
-                try:
-                    if self._nested is None:
-                        self._run_callback(self, eobj)
-                        yield eobj
-                    else:
-                        Klass = globals().get(self._nested.title(),
-                                              self._intf.__class__)
-                        for subeobj in Klass(
-                            cbase=join_uri(eobj._uri, self._nested),
-                            interface=self._intf,
-                            pattern=self._pattern,
-                            id_header=self._id_header,
-                            columns=self._columns):
-
-                            try:
-                                self._run_callback(self, eobj)
-                                yield subeobj
-                            except RuntimeError:
-                                pass
-
-                except KeyboardInterrupt:
-                    self._intf._connect()
-                    raise StopIteration
-
-        elif self._ctype == 'cobjectcobjects':
-            for cobj in self._cbase:
-                try:
-                    for eobj in cobj:
-                        if self._nested is None:
-                            self._run_callback(self, eobj)
-                            yield eobj
-                        else:
-                            Klass = globals().get(cobj._nested.title(),
-                                                  self._intf.__class__)
-
-                            for subeobj in Klass(
-                                cbase=join_uri(eobj._uri, cobj._nested),
-                                interface=cobj._intf,
-                                pattern=cobj._pattern,
-                                id_header=cobj._id_header,
-                                columns=cobj._columns):
-
-                                try:
-                                    self._run_callback(self, eobj)
-                                    yield subeobj
-                                except RuntimeError:
-                                    pass
-
-                except KeyboardInterrupt:
-                    self._intf._connect()
-                    raise StopIteration
-
-        elif self._ctype == 'cobjectempty':
-            for empty in []:
-                yield empty
 
     def _run_callback(self, cobj, eobj):
         if self._intf._callback is not None:
@@ -990,7 +1007,7 @@ class CObject(object):
             poi = searchpop
 
         cobj._cbase = list(poi)
-        cobj._ctype = 'cobjecteuris'
+        cobj._iterfn = _iter_cobjecteuris
         cobj._nested = None
         cobj._id_header = backup_header
 
