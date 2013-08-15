@@ -36,6 +36,7 @@ from . import schema
 from . import httputil
 from . import downloadutils
 
+import pdb
 
 DEBUG = False
 
@@ -173,7 +174,7 @@ class EObject(object):
         """
         return self._getcells([col])
 
-    def _getcells(self, cols):
+    def _getcells(self, cols, params=[]):
         """ Gets multiple properties of the element resource.
         """
         p_uri = uri_parent(self._uri)
@@ -181,11 +182,10 @@ class EObject(object):
         lbl_head = schema.json[self._urt][1]
         filters = {}
 
-        columns = set([col for col in cols
-                       if col not in schema.json[self._urt] \
-                           or col != 'URI'] + schema.json[self._urt]
-                      )
-        get_id = p_uri + '?format=json&columns=%s' % ','.join(columns)
+        get_id = p_uri + '&'.join(['?format=json']
+                                  + params
+                                  + ['columns=%s' %
+                                     ','.join(set(cols + schema.json[self._urt]))])
         
         for pattern in self._intf._struct.keys():
             if fnmatch(uri_segment(
@@ -206,6 +206,8 @@ class EObject(object):
                          )
 
         for res in self._intf._get_json(get_id):
+            logger.debug('received %s\n  looking for %s in [%s,%s]',
+                         res, self._urn, res.get(id_head), res.get(lbl_head))
             if self._urn in [res.get(id_head), res.get(lbl_head)]:
                 if len(cols) == 1:
                     return res.get(cols[0])
@@ -729,7 +731,7 @@ class CObject(object):
     def __repr__(self):
         return '<%s Collection> %s' % (self.__class__.__name__, id(self))
 
-    def _call(self, columns):
+    def _call(self, columns, options={}):
         try:
             uri = translate_uri(self._cbase)
             uri = urllib.quote(uri)
@@ -759,7 +761,11 @@ class CObject(object):
             #     struct = json.load(open(reqcache, 'rb'))
                 # self._intf._struct[reqcache] = struct
 
-            query_string = '?format=json&columns=%s' % ','.join(columns)
+            query_string = '?format=json'
+
+            # files doesn't take columns query param
+            if columns and not uri.endswith('/files'):
+                query_string += '&columns=' + ','.join(columns)
 
             # struct = {}
 
@@ -775,17 +781,11 @@ class CObject(object):
 
             #         self._filters.setdefault('xsiType', set()
             #                                  ).add(struct[pattern])
-
             if self._filters:
-                query_string += '&' + '&'.join(
-                    '%s=%s' % (item[0], item[1])
-                    if isinstance(item[1], (str, unicode))
-                    else '%s=%s' % (
-                        item[0], ','.join([val for val in item[1]]))
-                    for item in self._filters.items()
-                    )
+                options += self._filters
 
-            jtable = self._intf._get_json(uri + query_string)
+#            pdb.set_trace()
+            jtable = self._intf._get_json(uri + query_string, options)
 
             if (not os.path.exists(reqcache) and gather) \
                     or (gather and tick):
@@ -1566,7 +1566,7 @@ class Scan(EObject):
 class Resource(EObject):
     __metaclass__ = ElementType
 
-    def get(self, dest_dir, extract=False):
+    def _get(self, dest_dir, extract=False):
         """ Downloads all the files within a resource.
 
             ..warning::
@@ -1593,7 +1593,7 @@ class Resource(EObject):
             the zip.
         """
         zip_location = os.path.join(dest_dir, uri_last(self._uri) + '.zip')
-
+        
         if dest_dir is not None:
             self._intf._http.cache.preset(zip_location)
 
@@ -1607,16 +1607,17 @@ class Resource(EObject):
 
         for member in fzip.namelist():
             old_path = os.path.join(dest_dir, member)
-            print(member)
-            print(member.split('files', 1))
+            logger.debug(member.split('files',1))
             new_path = os.path.join(
                 dest_dir,
                 uri_last(self._uri),
-                member.split('files', 1)[1].split(os.sep, 1)[1]
-                )
+                member.split('files',1)[1].split('/',1)[1]
+            )
 
-            if not os.path.exists(os.path.dirname(new_path)):
+            try:
                 os.makedirs(os.path.dirname(new_path))
+            except OSError:
+                pass
 
             shutil.move(old_path, new_path)
 
@@ -1625,7 +1626,7 @@ class Resource(EObject):
         # TODO: cache.delete(...)
         for extracted in fzip.namelist():
             pth = os.path.join(dest_dir, extracted.split(os.sep, 1)[0])
-
+            
             if os.path.isdir(pth):
                 shutil.rmtree(pth)
 
@@ -1633,12 +1634,8 @@ class Resource(EObject):
 
         if not extract:
             fzip = zipfile.ZipFile(zip_location, 'w')
-            arcprefix = os.path.commonprefix(members).rpartition(os.sep)[0]
-            arcroot = '/%s' % os.path.split(arcprefix.rstrip(os.sep))[1]
             for member in members:
-                fzip.write(member, os.path.join(arcroot,
-                                                member.split(arcprefix)[1])
-                           )
+                fzip.write(member)
             fzip.close()
             unzippedTree = os.path.join(dest_dir, uri_last(self._uri))
             if os.path.exists(unzippedTree):
@@ -1646,10 +1643,43 @@ class Resource(EObject):
                     shutil.rmtree(os.path.join(dest_dir, uri_last(self._uri)))
                 else :
                     os.remove(unzippedTree)
-
+                        
         return zip_location if os.path.exists(zip_location) else members
 
-    def put(self, sources, overwrite=False, extract=True, **datatypes):
+    def get(self, dest_dir=None, extract=False):
+        """ Returns a local copy of all files in a resource.
+
+            ..warning::
+                Currently XNAT adds parent folders in the zip file that
+                is downloaded to avoid name clashes if several resources
+                are downloaded in the same folder. In order to be able to
+                download the data uploaded previously with the same
+                structure, pyxnat extracts the zip file, remove the exra
+                paths and if necessary re-zips it. Careful, it may take
+                time, and there is the problem of name clashes.
+
+            Parameters
+            ----------
+            dest_dir: string
+                Destination directory for the resource data.
+                If None, uses local data mirror if there is one,
+                otherwise current directory.
+            extract: boolean
+                If True, the downloaded zip file is extracted.
+                If False, not extracted.
+                
+            Returns
+            -------
+            If extract is False, the zip file path.
+            If extract is True, the list of file paths previously in 
+            the zip.
+        """
+        try:
+            return self._intf.archive.get_resource(self, extract, dest_dir)
+        except AttributeError:
+            return self._get(dest_dir or '.', extract)
+
+    def put(self, sources, **datatypes):
         """ Insert a list of files in a single resource element.
 
             This method takes all the files an creates a zip with them
@@ -1781,27 +1811,59 @@ class File(EObject):
     """
     __metaclass__ = ElementType
 
-    def __init__(self, uri, interface):
+    def __init__(self, uri, interface, archive_path=None):
         """ 
             Parameters
             ----------
             uri: string
                 The file resource URI
             interface: Interface Object
+            archive_path: string
+                The file's pathname on the server
         """
-
         EObject.__init__(self, uri, interface)
+        logger.debug('File(uri=%s, interface=%s, archive_path=%s)',
+                     uri, interface, archive_path)
         self._urn = file_path(uri)
         self._absuri = None
+        if archive_path:
+            self.server_path = archive_path
+            try:
+                self.local_path = self._intf.archive.local_path(archive_path)
+            except AttributeError:
+                self.local_path = archive_path
 
     def __repr__(self):
         return '<%s Object> %s' % (self.__class__.__name__,
                                    self._urn
                                    )
 
+    def _get_file_attrs(self):
+        """Get attributes for the named file from the containing resource catalog.
+        This is fairly terrible if you're going to be, say, iterating over the
+        files in a DICOM session. Better would be to cache the catalog.
+        """
+        try:
+            locator = self._intf.archive.locator
+        except AttributeError:
+            locator = None
+        
+        p_uri = uri_parent(self._uri)
+        req = p_uri + '?format=csv'
+        if locator:
+            req += '&locator='+locator
+
+        url = p_uri + '?format=csv'
+        content = self._exec(uri, 'GET') # requests? streaming?
+        return content
+    # TODO: in progress
+    # TODO: read CSV into table: array of arrays?
+    # TODO: search table for this item
+    # TODO: extract and return attribute values
+
     def attributes(self):
         """ Files attributes include:
-                - URI
+                - URI | absolutePath (depending on archive mirror)
                 - Name
                 - Size in bytes
                 - path (relative to the parent resource)
@@ -1811,11 +1873,20 @@ class File(EObject):
 
             Returns
             -------
-            dict : a dictionnary with the file attributes
+            dict : a dictionary with the file attributes
         """
-
-        return self._getcells(['URI', 'Name', 'Size', 'path',
-                               'file_tags', 'file_format', 'file_content'])
+        cols = ['Name','Size','file_tags','file_format','file_content']
+        try:
+            locator = self._intf.archive.locator
+        except AttributeError:
+            locator = 'URI'
+        cols = [locator] + cols
+        print 
+        params = [] if 'URI' == locator else ['locator='+locator]
+        attrs = self._getcells(cols, params)
+        if 'URI' != locator:
+            self._abspath = attrs[locator]
+        return attrs
 
     def get(self, dest=None, force_default=False):
         """ Downloads the file to the cache directory.
@@ -1843,11 +1914,16 @@ class File(EObject):
             string : the file location.
         """
 
+        try:
+            return self._intf.archive.get_file(self.archive_path)
+        except AttributeError:
+            pass
+
         if not self._absuri:
             self._absuri = self._getcell('URI')
 
         if self._absuri is None:
-            raise DataError('Cannot get file: does not exists')
+            raise DataError('Cannot get file: does not exist')
 
         if dest is not None:
             self._intf._http.cache.preset(dest)
@@ -2161,8 +2237,61 @@ class In_Resources(Resources):
 class Out_Resources(Resources):
     __metaclass__ = CollectionType
 
+def _iter_files_filepath(self):
+    """Specialization of the cobjectcuri iterator to retrieve server
+    file paths"""
+    id_header = 'Name'
+
+    try:
+        options = {'locator': self._intf.archive.locator}
+    except AttributeError:
+        options = {}
+
+    for res in self._call([id_header] + self._columns, options):
+        logger.debug(' file entry %s: %s', res[id_header], res)
+        try:
+            eid = urllib.unquote(res[id_header])
+            if fnmatch(eid, self._pattern):
+                klass_name = uri_last(self._cbase).rstrip('s').title()
+                Klass = globals().get(klass_name, self._intf.__class__)
+                logger.debug('element class %s', Klass)
+                eobj = Klass(join_uri(self._cbase, eid), self._intf,
+                             archive_path=res[self._intf.archive.locator])
+                if self._nested is None:
+                    self._run_callback(self, eobj)
+                    yield eobj
+                else:
+                    Klass = globals().get(self._nested.title(),
+                                          self._intf.__class__)
+                    logger.debug('nested class %s', Klass)
+                    for subeobj in Klass(
+                            cbase=join_uri(eobj._uri, self._nested),
+                            interface=self._intf,
+                            pattern=self._pattern,
+                            id_header=self._id_header,
+                            columns=self._columns):
+                        
+                        try:
+                            self._run_callback(self, subeobj)
+                            yield subeobj
+                        except RuntimeError:
+                            pass
+
+        except KeyboardInterrupt:
+            self._intf._connect()
+            raise StopIteration
+
 class Files(CObject):
     __metaclass__ = CollectionType
+
+    def __iter__(self):
+        try:
+            locator = self._intf.archive.locator
+            if isinstance(self._cbase, basestring):
+                return _iter_files_filepath(self)
+        except AttributeError:
+            pass
+        return super(Files, self).__iter__()
 
 class In_Files(Files):
     __metaclass__ = CollectionType
