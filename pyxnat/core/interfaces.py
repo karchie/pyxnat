@@ -4,6 +4,8 @@ import time
 import tempfile
 import email
 import getpass
+import logging
+import pdb
 
 import httplib2
 import json
@@ -17,6 +19,7 @@ try:
 except ImportError:
     from urllib.parse import urlparse
 from .select import Select
+from .archive import LocalXNATArchive
 from .cache import CacheManager, HTCache
 from .help import Inspector, GraphData, PaintGraph, _DRAW_GRAPHS
 from .manage import GlobalManager
@@ -31,6 +34,7 @@ from . import xpass
 
 DEBUG = False
 
+logger = logging.getLogger('pyxnat.interfaces')
 
 # main entry point
 class Interface(object):
@@ -435,7 +439,7 @@ class Interface(object):
 
         return content
 
-    def _get_json(self, uri):
+    def _get_json(self, uri, options={}):
         """ Specific Interface._exec method to retrieve data.
             It forces the data format to csv and then puts it back to a
             json-like format.
@@ -456,6 +460,12 @@ class Interface(object):
                 uri += '&format=csv'
             else:
                 uri += '?format=csv'
+        if options:
+            uri += '&' if '?' in uri else '?'
+            uri += '&'.join(['%s=%s' %
+                             (k, v if isinstance(v, basestring)
+                              else ','.join(v))
+                             for k,v in options.iteritems()])
 
         content = self._exec(uri, 'GET')
 
@@ -468,7 +478,11 @@ class Interface(object):
         base_uri = uri.split('?')[0]
         if uri_last(base_uri) == 'files':
             for element in json_content:
-                element['path'] = file_path(element['URI'])
+                try:
+                    element['path'] = element[options['locator']]
+                except KeyError:
+                    element['path'] = file_path(element['URI'])
+
         return json_content
 
     def _get_head(self, uri):
@@ -497,6 +511,9 @@ class Interface(object):
                 info[key] = value
 
         return info
+
+    def disconnect(self):
+        self.__exit__()
 
     def save_config(self, location):
         """ Saves current configuration - including password - in a file.
@@ -577,9 +594,19 @@ class Interface(object):
     def set_logging(self, level=0):
         pass
 
-    def disconnect(self):
+    def __enter__(self):
+        pass
+
+    def __exit__(self):
         """
             Tell XNAT to disconnect this session
         """
         self._exec('/data/JSESSION', method='DELETE')
-        pass
+
+    def use_local_archive(self, rootdir='/', archive_root=None):
+        """We have direct filesystem access to the XNAT archive,
+        possibly with filepath substitution as specified by rootdir
+        (the archive root as seen by this script) and archive_root
+        (the archive root as seen by XNAT).
+        """
+        self.archive = LocalXNATArchive(rootdir, archive_root)
