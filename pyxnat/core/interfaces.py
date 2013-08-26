@@ -19,7 +19,7 @@ try:
 except ImportError:
     from urllib.parse import urlparse
 from .select import Select
-from .archive import LocalXNATArchive
+from .archive import LocalXNATArchive, MirrorXNATArchive
 from .cache import CacheManager, HTCache
 from .help import Inspector, GraphData, PaintGraph, _DRAW_GRAPHS
 from .manage import GlobalManager
@@ -584,6 +584,9 @@ class Interface(object):
     def version(self):
         return self._exec('/data/version')
 
+    def settings(self, *args):
+        return json.loads(self._exec('data/services/settings'))['ResultSet']['Result']
+
     def set_logging(self, level=0):
         pass
 
@@ -596,10 +599,20 @@ class Interface(object):
         """
         self._exec('/data/JSESSION', method='DELETE')
 
-    def use_local_archive(self, rootdir='/', archive_root=None):
+    def use_local_archive(self, rootdir=None):
         """We have direct filesystem access to the XNAT archive,
         possibly with filepath substitution as specified by rootdir
         (the archive root as seen by this script) and archive_root
         (the archive root as seen by XNAT).
         """
-        self.archive = LocalXNATArchive(rootdir, archive_root)
+        if rootdir:
+            self.archive = LocalXNATArchive(self, rootdir,
+                                            self.settings()['archivePath'])
+        else:
+            self.archive = LocalXNATArchive(self)
+
+    def use_local_mirror(self, rootdir='.'):
+        """Use downloads to build a mirror of the XNAT archive."""
+        self.archive = MirrorXNATArchive(rootdir,
+                                         self.settings()['archivePath'])
+

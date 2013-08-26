@@ -1607,7 +1607,6 @@ class Resource(EObject):
 
         for member in fzip.namelist():
             old_path = os.path.join(dest_dir, member)
-            logger.debug(member.split('files',1))
             new_path = os.path.join(
                 dest_dir,
                 uri_last(self._uri),
@@ -1676,7 +1675,8 @@ class Resource(EObject):
         """
         try:
             return self._intf.archive.get_resource(self, extract, dest_dir)
-        except AttributeError:
+        except AttributeError as e:
+            logger.debug('unable to use local archive: {}', e)
             return self._get(dest_dir or '.', extract)
 
     def put(self, sources, **datatypes):
@@ -1831,7 +1831,7 @@ class File(EObject):
             try:
                 self.local_path = self._intf.archive.local_path(archive_path)
             except AttributeError:
-                self.local_path = archive_path
+                pass
 
     def __repr__(self):
         return '<%s Object> %s' % (self.__class__.__name__,
@@ -1888,18 +1888,43 @@ class File(EObject):
             self._abspath = attrs[locator]
         return attrs
 
-    def get(self, dest=None, force_default=False):
-        """ Downloads the file to the cache directory.
+    def _get(self, dest, force_default):
+        """ Downloads the named file to the cache.
 
             .. note::
                 The default cache path is computed like this: 
                 ``path_to_cache/md5(uri + query_string)_filename``
 
+        """
+        if not self._absuri:
+            self._absuri = self._getcell('URI')
+
+        if self._absuri is None:
+            raise DataError('Cannot get file: does not exist')
+
+        cache = self._intf._http.cache
+        cachename = cache.get_diskpath('%s%s' %
+                                       (self._intf._server, self._absuri))                                       
+        if dest:
+            cache.preset(dest)
+        elif not force_default:
+            _location = cache.get_diskpath(cachename)
+
+        self._intf._exec(self._uri, 'GET')
+
+        return cachename
+
+    def get(self, dest=None, force_default=False):
+        """ Ensures the existence of a local copy of the file.
+
             Parameters
             ----------
             dest: string | None
-                - If None a default path in the cache folder is
-                  automatically computed. 
+                - If None:
+                    if the interface has an associated local archive,
+                    the returned filepath is in that archive;
+                    otherwise, a default path in the cache folder is
+                    automatically computed. 
                 - Else the file is downloaded at the requested location.
             force_default: boolean
                 - Has no effect if the file is downloaded for the first time
@@ -1915,31 +1940,15 @@ class File(EObject):
         """
 
         try:
-            return self._intf.archive.get_file(self.archive_path)
+            path = self._intf.archive.get_file(self)
+            if dest:
+                shutil.copy(path, dest)
+                return dest
+            else:
+                return path
         except AttributeError:
-            pass
+            return self._get(dest, force_default)
 
-        if not self._absuri:
-            self._absuri = self._getcell('URI')
-
-        if self._absuri is None:
-            raise DataError('Cannot get file: does not exist')
-
-        if dest is not None:
-            self._intf._http.cache.preset(dest)
-        elif not force_default:
-            _location = \
-                self._intf._http.cache.get_diskpath(
-                '%s%s' % (self._intf._server, self._absuri)
-                )
-
-            self._intf._http.cache.preset(_location)
-
-        self._intf._exec(self._uri, 'GET')
-
-        return self._intf._http.cache.get_diskpath(
-            '%s%s' % (self._intf._server, self._absuri)
-            )
 
     def get_copy(self, dest=None):
         """ Downloads the file to the cache directory but creates a copy at
@@ -1967,8 +1976,10 @@ class File(EObject):
             dest = os.path.join(self._intf._http.cache.cache, 'workspace',
                                 *self._absuri.strip('/').split('/')[1:])
 
-        if not os.path.exists(os.path.dirname(dest)):
+        try:
             os.makedirs(os.path.dirname(dest))
+        except OSError:
+            pass
 
         src = self.get()
 
